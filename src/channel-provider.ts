@@ -146,7 +146,14 @@ export async function sendNotification(
       (err as { status?: number; code?: number })?.status ?? (err as { status?: number; code?: number })?.code;
     if (status === 403) {
       logger.warn({ msg: "DM not authorized (403), falling back to tweet" });
-      await twitterClient.tweet(message, undefined);
+      try {
+        await twitterClient.tweet(message, undefined);
+      } catch (err2) {
+        clearTimeout(timeoutHandle);
+        activeNotificationTimeouts.delete(timeoutHandle);
+        twitterChannelProvider.removeMessageParser(parserId);
+        throw err2;
+      }
     } else {
       // Transient error — clean up parser and rethrow; don't leak privately
       twitterChannelProvider.removeMessageParser(parserId);
