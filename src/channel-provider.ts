@@ -17,10 +17,9 @@ export function setTwitterProviderClient(c: TwitterClient | null, username?: str
   twitterClient = c;
   if (c === null) {
     ownerUserId = null;
-  } else {
-    if (username) botUsername = username;
-    if (ownerId) ownerUserId = ownerId;
   }
+  if (username) botUsername = username;
+  if (c !== null && ownerId) ownerUserId = ownerId;
 }
 
 const registeredCommands: Map<string, ChannelCommand> = new Map();
