@@ -5,7 +5,7 @@
  * Handles the WOPRPlugin lifecycle (init/shutdown).
  */
 
-import { setTwitterProviderClient, twitterChannelProvider } from "./channel-provider.js";
+import { clearNotificationParsers, setTwitterProviderClient, twitterChannelProvider } from "./channel-provider.js";
 import { logger } from "./logger.js";
 import { StreamManager } from "./stream-manager.js";
 import { TwitterClient } from "./twitter-client.js";
@@ -164,7 +164,7 @@ const plugin: WOPRPlugin = {
     // Wire client into channel provider
     try {
       const me = await twitterClient.raw.v2.me();
-      setTwitterProviderClient(twitterClient, me.data.username);
+      setTwitterProviderClient(twitterClient, me.data.username, me.data.id);
       logger.info({ msg: "Twitter client authenticated", username: me.data.username });
     } catch (err) {
       logger.error({ msg: "Twitter authentication failed", error: String(err) });
@@ -214,6 +214,7 @@ const plugin: WOPRPlugin = {
     if (ctx?.unregisterConfigSchema) {
       ctx.unregisterConfigSchema("wopr-plugin-twitter");
     }
+    clearNotificationParsers();
     setTwitterProviderClient(null);
     twitterClient = null;
     ctx = null;

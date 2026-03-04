@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { setTwitterProviderClient, twitterChannelProvider } from "../src/channel-provider.js";
+import {
+  clearNotificationParsers,
+  sendNotification,
+  setTwitterProviderClient,
+  twitterChannelProvider,
+} from "../src/channel-provider.js";
 
 describe("twitterChannelProvider", () => {
   beforeEach(() => {
@@ -72,5 +77,133 @@ describe("twitterChannelProvider", () => {
     const calledWith = mockTweet.mock.calls[0][0] as string;
     expect(calledWith.length).toBeLessThanOrEqual(280);
     expect(calledWith.endsWith("...")).toBe(true);
+  });
+});
+
+describe("sendNotification", () => {
+  const mockClient = {
+    sendDM: vi.fn().mockResolvedValue(undefined),
+    tweet: vi.fn().mockResolvedValue("tweet-id-123"),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearNotificationParsers();
+    twitterChannelProvider.getMessageParsers().forEach((p) => twitterChannelProvider.removeMessageParser(p.id));
+    setTwitterProviderClient(mockClient as any, "botuser", "owner-user-id-123");
+  });
+
+  it("should be a no-op for non-friend-request types", async () => {
+    const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
+    await sendNotification("dm:owner-user-id-123", { type: "other", from: "someone" }, callbacks);
+    expect(mockClient.sendDM).not.toHaveBeenCalled();
+    expect(callbacks.onAccept).not.toHaveBeenCalled();
+    expect(callbacks.onDeny).not.toHaveBeenCalled();
+  });
+
+  it("should send a DM to the owner for friend-request", async () => {
+    const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
+    await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
+    expect(mockClient.sendDM).toHaveBeenCalledWith("owner-user-id-123", expect.stringContaining("alice"));
+    expect(mockClient.sendDM).toHaveBeenCalledWith("owner-user-id-123", expect.stringContaining("ACCEPT"));
+  });
+
+  it("should register a one-shot message parser", async () => {
+    const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
+    await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
+    const parsers = twitterChannelProvider.getMessageParsers();
+    const notifParser = parsers.find((p) => p.id.startsWith("notif-friend-"));
+    expect(notifParser).toBeDefined();
+  });
+
+  it("should fire onAccept when handler receives ACCEPT from owner", async () => {
+    const callbacks = {
+      onAccept: vi.fn().mockResolvedValue(undefined),
+      onDeny: vi.fn().mockResolvedValue(undefined),
+    };
+    await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
+    const parsers = twitterChannelProvider.getMessageParsers();
+    const notifParser = parsers.find((p) => p.id.startsWith("notif-friend-"));
+    expect(notifParser).toBeDefined();
+    await notifParser!.handler({
+      channel: "dm:owner-user-id-123",
+      channelType: "twitter",
+      sender: "owner-user-id-123",
+      content: "accept",
+      reply: vi.fn(),
+      getBotUsername: () => "botuser",
+    });
+    expect(callbacks.onAccept).toHaveBeenCalled();
+    expect(callbacks.onDeny).not.toHaveBeenCalled();
+    // Parser should be removed (one-shot)
+    const remaining = twitterChannelProvider.getMessageParsers();
+    expect(remaining.find((p) => p.id === notifParser!.id)).toBeUndefined();
+  });
+
+  it("should fire onDeny when handler receives DENY from owner", async () => {
+    const callbacks = {
+      onAccept: vi.fn().mockResolvedValue(undefined),
+      onDeny: vi.fn().mockResolvedValue(undefined),
+    };
+    await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
+    const parsers = twitterChannelProvider.getMessageParsers();
+    const notifParser = parsers.find((p) => p.id.startsWith("notif-friend-"));
+    await notifParser!.handler({
+      channel: "dm:owner-user-id-123",
+      channelType: "twitter",
+      sender: "owner-user-id-123",
+      content: "DENY",
+      reply: vi.fn(),
+      getBotUsername: () => "botuser",
+    });
+    expect(callbacks.onDeny).toHaveBeenCalled();
+    expect(callbacks.onAccept).not.toHaveBeenCalled();
+  });
+
+  it("should not fire callbacks for non-owner sender", async () => {
+    const callbacks = {
+      onAccept: vi.fn().mockResolvedValue(undefined),
+      onDeny: vi.fn().mockResolvedValue(undefined),
+    };
+    await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
+    const parsers = twitterChannelProvider.getMessageParsers();
+    const notifParser = parsers.find((p) => p.id.startsWith("notif-friend-"));
+    await notifParser!.handler({
+      channel: "dm:owner-user-id-123",
+      channelType: "twitter",
+      sender: "other-user",
+      content: "ACCEPT",
+      reply: vi.fn(),
+      getBotUsername: () => "botuser",
+    });
+    expect(callbacks.onAccept).not.toHaveBeenCalled();
+    expect(callbacks.onDeny).not.toHaveBeenCalled();
+    // Parser should still be registered
+    expect(twitterChannelProvider.getMessageParsers().find((p) => p.id === notifParser!.id)).toBeDefined();
+  });
+
+  it("should fall back to tweet if DM fails", async () => {
+    mockClient.sendDM.mockRejectedValueOnce(new Error("DM API unavailable"));
+    const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
+    await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
+    expect(mockClient.tweet).toHaveBeenCalledWith(expect.stringContaining("alice"), undefined);
+  });
+
+  it("should throw if twitterClient is null", async () => {
+    setTwitterProviderClient(null);
+    const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
+    await expect(
+      sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks),
+    ).rejects.toThrow("Twitter client not initialized");
+  });
+
+  it("should clean up parser on timeout", async () => {
+    vi.useFakeTimers();
+    const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
+    await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
+    expect(twitterChannelProvider.getMessageParsers().find((p) => p.id.startsWith("notif-friend-"))).toBeDefined();
+    vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+    expect(twitterChannelProvider.getMessageParsers().find((p) => p.id.startsWith("notif-friend-"))).toBeUndefined();
+    vi.useRealTimers();
   });
 });

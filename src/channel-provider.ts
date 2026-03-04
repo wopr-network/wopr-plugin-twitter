@@ -11,10 +11,12 @@ import type { ChannelCommand, ChannelMessageParser, ChannelProvider } from "./ty
 
 let twitterClient: TwitterClient | null = null;
 let botUsername = "unknown";
+let ownerUserId: string | null = null;
 
-export function setTwitterProviderClient(c: TwitterClient | null, username?: string): void {
+export function setTwitterProviderClient(c: TwitterClient | null, username?: string, ownerId?: string): void {
   twitterClient = c;
   if (username) botUsername = username;
+  if (ownerId) ownerUserId = ownerId;
 }
 
 const registeredCommands: Map<string, ChannelCommand> = new Map();
@@ -76,3 +78,72 @@ export const twitterChannelProvider: ChannelProvider = {
     return botUsername;
   },
 };
+
+const NOTIFICATION_TIMEOUT_MS = 5 * 60 * 1000;
+const activeNotificationTimeouts: Set<ReturnType<typeof setTimeout>> = new Set();
+
+/** Send a friend-request notification to the bot owner via DM (falls back to tweet). */
+export async function sendNotification(
+  channelId: string,
+  payload: { type: string; from: string; [key: string]: unknown },
+  callbacks: { onAccept: () => Promise<void>; onDeny: () => Promise<void> },
+): Promise<void> {
+  if (payload.type !== "friend-request") return;
+  if (!twitterClient) throw new Error("Twitter client not initialized");
+
+  const targetUserId = ownerUserId ?? channelId.replace(/^dm:/, "");
+  const message = `Friend request from @${payload.from}. Reply ACCEPT or DENY.`;
+
+  try {
+    await twitterClient.sendDM(targetUserId, message);
+  } catch (err) {
+    logger.warn({ msg: "DM failed, falling back to tweet", error: String(err) });
+    await twitterClient.tweet(message, undefined);
+  }
+
+  const parserId = `notif-friend-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const timeoutHandle = setTimeout(() => {
+    activeNotificationTimeouts.delete(timeoutHandle);
+    twitterChannelProvider.removeMessageParser(parserId);
+    logger.info({ msg: "Notification parser timed out", parserId });
+  }, NOTIFICATION_TIMEOUT_MS);
+
+  activeNotificationTimeouts.add(timeoutHandle);
+
+  const parser: ChannelMessageParser = {
+    id: parserId,
+    pattern: (msg: string) => {
+      const upper = msg.trim().toUpperCase();
+      return upper === "ACCEPT" || upper === "DENY";
+    },
+    async handler(ctx) {
+      // Only respond to messages from the owner
+      if (ctx.sender !== targetUserId) return;
+      clearTimeout(timeoutHandle);
+      activeNotificationTimeouts.delete(timeoutHandle);
+      twitterChannelProvider.removeMessageParser(parserId);
+      const upper = ctx.content.trim().toUpperCase();
+      if (upper === "ACCEPT") {
+        await callbacks.onAccept();
+      } else {
+        await callbacks.onDeny();
+      }
+    },
+  };
+
+  twitterChannelProvider.addMessageParser(parser);
+  logger.info({ msg: "Notification parser registered", parserId, from: payload.from });
+}
+
+export function clearNotificationParsers(): void {
+  for (const handle of activeNotificationTimeouts) {
+    clearTimeout(handle);
+  }
+  activeNotificationTimeouts.clear();
+  for (const parser of registeredParsers.values()) {
+    if (parser.id.startsWith("notif-")) {
+      registeredParsers.delete(parser.id);
+    }
+  }
+}
