@@ -87,14 +87,15 @@ const activeNotificationTimeouts: Set<ReturnType<typeof setTimeout>> = new Set()
 
 /** Send a friend-request notification to the bot owner via DM (falls back to tweet). */
 export async function sendNotification(
-  channelId: string,
+  _channelId: string,
   payload: { type: string; from: string; [key: string]: unknown },
   callbacks: { onAccept: () => Promise<void>; onDeny: () => Promise<void> },
 ): Promise<void> {
   if (payload.type !== "friend-request") return;
   if (!twitterClient) throw new Error("Twitter client not initialized");
 
-  const targetUserId = ownerUserId ?? channelId.replace(/^dm:/, "");
+  if (!ownerUserId) throw new Error("sendNotification: ownerUserId not set — cannot send notification");
+  const targetUserId = ownerUserId;
   const message = `Friend request from @${payload.from}. Reply ACCEPT or DENY.`;
 
   const parserId = `notif-friend-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -110,8 +111,11 @@ export async function sendNotification(
   const parser: ChannelMessageParser = {
     id: parserId,
     pattern: (msg: string) => {
-      const upper = msg.trim().toUpperCase();
-      return upper === "ACCEPT" || upper === "DENY";
+      const stripped = msg
+        .trim()
+        .replace(/^(@\w+\s+)+/, "")
+        .toUpperCase();
+      return stripped === "ACCEPT" || stripped === "DENY";
     },
     async handler(ctx) {
       // Only respond to messages from the owner
@@ -119,7 +123,10 @@ export async function sendNotification(
       clearTimeout(timeoutHandle);
       activeNotificationTimeouts.delete(timeoutHandle);
       twitterChannelProvider.removeMessageParser(parserId);
-      const upper = ctx.content.trim().toUpperCase();
+      const upper = ctx.content
+        .trim()
+        .replace(/^(@\w+\s+)+/, "")
+        .toUpperCase();
       if (upper === "ACCEPT") {
         await callbacks.onAccept();
       } else {
