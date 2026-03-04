@@ -15,8 +15,12 @@ let ownerUserId: string | null = null;
 
 export function setTwitterProviderClient(c: TwitterClient | null, username?: string, ownerId?: string): void {
   twitterClient = c;
-  if (username) botUsername = username;
-  if (ownerId) ownerUserId = ownerId;
+  if (c === null) {
+    ownerUserId = null;
+  } else {
+    if (username) botUsername = username;
+    if (ownerId) ownerUserId = ownerId;
+  }
 }
 
 const registeredCommands: Map<string, ChannelCommand> = new Map();
@@ -94,13 +98,6 @@ export async function sendNotification(
   const targetUserId = ownerUserId ?? channelId.replace(/^dm:/, "");
   const message = `Friend request from @${payload.from}. Reply ACCEPT or DENY.`;
 
-  try {
-    await twitterClient.sendDM(targetUserId, message);
-  } catch (err) {
-    logger.warn({ msg: "DM failed, falling back to tweet", error: String(err) });
-    await twitterClient.tweet(message, undefined);
-  }
-
   const parserId = `notif-friend-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   const timeoutHandle = setTimeout(() => {
@@ -132,8 +129,26 @@ export async function sendNotification(
     },
   };
 
+  // Register parser BEFORE sending so a fast reply is never dropped
   twitterChannelProvider.addMessageParser(parser);
   logger.info({ msg: "Notification parser registered", parserId, from: payload.from });
+
+  try {
+    await twitterClient.sendDM(targetUserId, message);
+  } catch (err: unknown) {
+    const status =
+      (err as { status?: number; code?: number })?.status ?? (err as { status?: number; code?: number })?.code;
+    if (status === 403) {
+      logger.warn({ msg: "DM not authorized (403), falling back to tweet" });
+      await twitterClient.tweet(message, undefined);
+    } else {
+      // Transient error — clean up parser and rethrow; don't leak privately
+      twitterChannelProvider.removeMessageParser(parserId);
+      clearTimeout(timeoutHandle);
+      activeNotificationTimeouts.delete(timeoutHandle);
+      throw err;
+    }
+  }
 }
 
 export function clearNotificationParsers(): void {
@@ -141,9 +156,8 @@ export function clearNotificationParsers(): void {
     clearTimeout(handle);
   }
   activeNotificationTimeouts.clear();
-  for (const parser of registeredParsers.values()) {
-    if (parser.id.startsWith("notif-")) {
-      registeredParsers.delete(parser.id);
-    }
+  const toDelete = [...registeredParsers.keys()].filter((id) => id.startsWith("notif-friend-"));
+  for (const id of toDelete) {
+    registeredParsers.delete(id);
   }
 }

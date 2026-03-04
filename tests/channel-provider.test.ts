@@ -182,11 +182,21 @@ describe("sendNotification", () => {
     expect(twitterChannelProvider.getMessageParsers().find((p) => p.id === notifParser!.id)).toBeDefined();
   });
 
-  it("should fall back to tweet if DM fails", async () => {
-    mockClient.sendDM.mockRejectedValueOnce(new Error("DM API unavailable"));
+  it("should fall back to tweet only on 403 DM failure", async () => {
+    const err403 = Object.assign(new Error("DM not authorized"), { status: 403 });
+    mockClient.sendDM.mockRejectedValueOnce(err403);
     const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
     await sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks);
     expect(mockClient.tweet).toHaveBeenCalledWith(expect.stringContaining("alice"), undefined);
+  });
+
+  it("should rethrow non-403 DM errors without falling back to tweet", async () => {
+    mockClient.sendDM.mockRejectedValueOnce(new Error("DM API unavailable"));
+    const callbacks = { onAccept: vi.fn(), onDeny: vi.fn() };
+    await expect(
+      sendNotification("dm:owner-user-id-123", { type: "friend-request", from: "alice" }, callbacks),
+    ).rejects.toThrow("DM API unavailable");
+    expect(mockClient.tweet).not.toHaveBeenCalled();
   });
 
   it("should throw if twitterClient is null", async () => {
